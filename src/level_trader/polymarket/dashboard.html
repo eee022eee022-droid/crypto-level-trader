@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Polymarket mean-reversion dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0f1115;
+    --panel: #161a22;
+    --panel2: #1d222c;
+    --border: #262c38;
+    --text: #e6e8ee;
+    --muted: #8b93a7;
+    --accent: #4f8cff;
+    --green: #2bd67b;
+    --red: #ff5470;
+    --yellow: #f6c84c;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg); color: var(--text);
+    font: 13px/1.45 -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif;
+  }
+  header {
+    padding: 16px 22px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .3px; }
+  header .muted { color: var(--muted); font-size: 12px; }
+  main { display: grid; grid-template-columns: 280px 1fr; gap: 16px; padding: 16px 22px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px;
+  }
+  .panel h2 { font-size: 12px; margin: 0 0 10px; text-transform: uppercase; color: var(--muted); letter-spacing: .8px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; }
+  label { display: flex; flex-direction: column; font-size: 11px; color: var(--muted); gap: 4px; }
+  input[type="number"] {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; padding: 6px 8px; font-size: 12px; font-variant-numeric: tabular-nums;
+  }
+  button {
+    background: var(--accent); color: white; border: 0; border-radius: 6px;
+    padding: 8px 12px; font-weight: 600; cursor: pointer; font-size: 12px;
+  }
+  button:disabled { opacity: .6; cursor: wait; }
+  button.secondary { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+  .row { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+  .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .kpi {
+    background: var(--panel2); border-radius: 6px; padding: 10px 12px;
+  }
+  .kpi .label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .6px; }
+  .kpi .value { font-size: 20px; font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .value.pos { color: var(--green); } .value.neg { color: var(--red); }
+  .chart-wrap { position: relative; height: 300px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 12px; }
+  th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; text-align: right; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
+  th:first-child, td:first-child { text-align: left; }
+  td.side-yes { color: var(--green); }
+  td.side-no { color: var(--red); }
+  td.pnl-pos { color: var(--green); }
+  td.pnl-neg { color: var(--red); }
+  .table-wrap { max-height: 420px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 99px; font-size: 10px; border: 1px solid var(--border); color: var(--muted); }
+  .status { color: var(--muted); font-size: 11px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Polymarket mean-reversion dashboard <span class="muted">· synthetic backtest</span></h1>
+  <div class="muted">bankroll <b>$<span id="hdr-bankroll">500</span></b> → ending <b class="pnl" id="hdr-ending">—</b></div>
+</header>
+
+<main>
+  <!-- LEFT: controls -->
+  <aside class="panel">
+    <h2>Parameters</h2>
+    <div class="grid">
+      <label>Bankroll ($)<input type="number" id="bankroll" value="500" step="50" min="10"/></label>
+      <label>Stake / trade ($)<input type="number" id="stake" value="10" step="1" min="0.1"/></label>
+      <label># markets<input type="number" id="n_markets" value="200" step="10" min="1" max="5000"/></label>
+      <label>Seed<input type="number" id="seed" value="7" step="1" min="0"/></label>
+      <label>Ticks / market<input type="number" id="steps" value="200" step="10" min="20"/></label>
+      <label>Taker fee<input type="number" id="taker_fee" value="0.01" step="0.005" min="0"/></label>
+      <label>Slippage<input type="number" id="slippage" value="0.005" step="0.001" min="0"/></label>
+      <label>EWMA half-life<input type="number" id="ewma_halflife" value="20" step="1" min="1"/></label>
+      <label>Entry threshold<input type="number" id="entry_threshold" value="0.05" step="0.005" min="0.001"/></label>
+      <label>Stop threshold<input type="number" id="stop_threshold" value="0.12" step="0.005" min="0.001"/></label>
+      <label>Max hold (ticks)<input type="number" id="max_hold" value="60" step="5" min="1"/></label>
+    </div>
+    <div class="row">
+      <button id="run-btn">Run backtest</button>
+      <span class="status" id="status"></span>
+    </div>
+    <p class="muted" style="margin-top:14px; font-size:11px;">
+      Strategy enters when the price deviates from its EWMA by more than the entry threshold and exits on reversion, stop, timeout or resolution. Every market is synthetic (Beta p_true + OU noise). Nothing is sent to a live exchange.
+    </p>
+  </aside>
+
+  <!-- RIGHT: results -->
+  <section style="display: flex; flex-direction: column; gap: 16px;">
+    <div class="panel">
+      <h2>Headline metrics</h2>
+      <div class="metrics">
+        <div class="kpi"><div class="label">Ending bankroll</div><div class="value" id="m-ending">—</div></div>
+        <div class="kpi"><div class="label">Total PnL</div><div class="value" id="m-pnl">—</div></div>
+        <div class="kpi"><div class="label">ROI</div><div class="value" id="m-roi">—</div></div>
+        <div class="kpi"><div class="label">Max drawdown</div><div class="value" id="m-dd">—</div></div>
+        <div class="kpi"><div class="label">Trades</div><div class="value" id="m-trades">—</div></div>
+        <div class="kpi"><div class="label">Winrate</div><div class="value" id="m-winrate">—</div></div>
+        <div class="kpi"><div class="label">Profit factor</div><div class="value" id="m-pf">—</div></div>
+        <div class="kpi"><div class="label">Fees paid</div><div class="value" id="m-fees">—</div></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Equity curve</h2>
+      <div class="chart-wrap"><canvas id="equity-chart"></canvas></div>
+    </div>
+
+    <div class="panel">
+      <h2>Trades <span class="badge" id="trade-count">0</span></h2>
+      <div class="table-wrap">
+        <table id="trade-table">
+          <thead>
+            <tr>
+              <th>#</th><th>Market</th><th>Side</th>
+              <th>Entry tick</th><th>Entry px</th>
+              <th>Exit tick</th><th>Exit px</th>
+              <th>Reason</th><th>Stake</th><th>Fees</th><th>PnL</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+const fmtUSD = v => (v >= 0 ? '+' : '') + '$' + v.toFixed(2);
+const fmtPct = v => (v >= 0 ? '+' : '') + (v * 100).toFixed(2) + '%';
+const cls = v => (v > 0 ? 'pos' : (v < 0 ? 'neg' : ''));
+
+function collectParams() {
+  const ids = ['bankroll','stake','n_markets','seed','steps','taker_fee','slippage',
+               'ewma_halflife','entry_threshold','stop_threshold','max_hold'];
+  const p = {};
+  for (const id of ids) p[id] = parseFloat(document.getElementById(id).value);
+  // ints
+  for (const id of ['n_markets','seed','steps','ewma_halflife','max_hold']) p[id] = Math.floor(p[id]);
+  return p;
+}
+
+let equityChart = null;
+
+function renderEquity(equity, drawdown) {
+  const labels = equity.map((_, i) => i);
+  if (equityChart) equityChart.destroy();
+  const ctx = document.getElementById('equity-chart').getContext('2d');
+  equityChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Bankroll ($)', data: equity, borderColor: '#4f8cff', borderWidth: 1.5,
+          pointRadius: 0, tension: 0.15, fill: false, yAxisID: 'y' },
+        { label: 'Drawdown ($)', data: drawdown, borderColor: '#ff5470', borderWidth: 1,
+          pointRadius: 0, tension: 0.1, fill: 'origin', backgroundColor: 'rgba(255,84,112,0.08)', yAxisID: 'y2' },
+      ],
+    },
+    options: {
+      animation: false,
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { labels: { color: '#8b93a7' } } },
+      scales: {
+        x: { ticks: { color: '#8b93a7', maxTicksLimit: 10 }, grid: { color: '#262c38' } },
+        y: { ticks: { color: '#8b93a7', callback: v => '$' + v.toFixed(0) }, grid: { color: '#262c38' } },
+        y2: { position: 'right', ticks: { color: '#ff5470', callback: v => '$' + v.toFixed(0) }, grid: { display: false } },
+      },
+    },
+  });
+}
+
+function renderTrades(trades) {
+  const tbody = document.querySelector('#trade-table tbody');
+  tbody.innerHTML = '';
+  const frag = document.createDocumentFragment();
+  trades.forEach((t, i) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${i+1}</td>
+      <td>${t.market_id}</td>
+      <td class="side-${t.side}">${t.side.toUpperCase()}</td>
+      <td>${t.entry_tick}</td>
+      <td>${t.entry_price.toFixed(4)}</td>
+      <td>${t.exit_tick ?? ''}</td>
+      <td>${t.exit_price != null ? t.exit_price.toFixed(4) : ''}</td>
+      <td>${t.exit_reason ?? ''}</td>
+      <td>${t.stake.toFixed(2)}</td>
+      <td>${t.fees_paid.toFixed(3)}</td>
+      <td class="pnl-${t.pnl > 0 ? 'pos' : (t.pnl < 0 ? 'neg' : '')}">${t.pnl >= 0 ? '+' : ''}${t.pnl.toFixed(3)}</td>
+    `;
+    frag.appendChild(tr);
+  });
+  tbody.appendChild(frag);
+  document.getElementById('trade-count').textContent = trades.length + ' trades';
+}
+
+function setMetric(id, value, signed = false, pct = false) {
+  const el = document.getElementById(id);
+  if (typeof value !== 'number' || !Number.isFinite(value)) { el.textContent = '—'; el.className = 'value'; return; }
+  el.textContent = pct ? fmtPct(value) : (signed ? fmtUSD(value) : value.toLocaleString(undefined, { maximumFractionDigits: 2 }));
+  el.className = 'value ' + (signed || pct ? cls(value) : '');
+}
+
+async function run() {
+  const btn = document.getElementById('run-btn');
+  const status = document.getElementById('status');
+  btn.disabled = true; status.textContent = 'running…';
+  const params = collectParams();
+  document.getElementById('hdr-bankroll').textContent = params.bankroll.toFixed(0);
+
+  try {
+    const resp = await fetch('/api/run', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status + ': ' + await resp.text());
+    const data = await resp.json();
+    const s = data.summary;
+    setMetric('m-ending', s.ending_bankroll);
+    document.getElementById('hdr-ending').textContent = '$' + s.ending_bankroll.toFixed(2);
+    document.getElementById('hdr-ending').className = 'pnl ' + cls(s.total_pnl);
+    setMetric('m-pnl', s.total_pnl, true);
+    setMetric('m-roi', s.roi, false, true);
+    setMetric('m-dd', s.max_drawdown, true);
+    setMetric('m-trades', s.n_trades);
+    setMetric('m-winrate', s.winrate, false, true);
+    setMetric('m-pf', s.profit_factor);
+    setMetric('m-fees', s.total_fees);
+    renderEquity(data.equity, data.drawdown);
+    renderTrades(data.trades);
+    status.textContent = 'done · ' + s.n_trades + ' trades · seed=' + params.seed;
+    if (s.bankroll_ever_wiped) status.textContent += ' · ⚠ bankroll hit 0';
+  } catch (e) {
+    status.textContent = 'error: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+document.getElementById('run-btn').addEventListener('click', run);
+// auto-run on page load
+run();
+</script>
+</body>
+</html>

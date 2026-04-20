@@ -105,6 +105,23 @@ the simulator produces; a live adapter backed by the public
 `data-api.polymarket.com` CLOB endpoints can feed the exact same
 `MeanReversionStrategy` without code changes.
 
+### Live dashboard
+
+A single-page FastAPI dashboard lets you watch the backtest, every trade
+and the equity curve in the browser:
+
+```bash
+uv run uvicorn level_trader.polymarket.dashboard:app --host 127.0.0.1 --port 8765
+# then open http://127.0.0.1:8765/
+```
+
+The default form starts from a $500 bankroll with a $10 stake per trade
+and auto-runs on load. Inputs for bankroll, stake, seed, number of
+markets, fees, slippage and the strategy thresholds are all editable —
+click *Run backtest* to replay with different knobs. The bottom table is
+the full per-trade blotter (side, entry/exit ticks and prices, exit
+reason, fees, PnL).
+
 ## Tests
 
 ```bash
