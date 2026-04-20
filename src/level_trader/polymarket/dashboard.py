@@ -188,8 +188,53 @@ class ForwardStartRequest(BaseModel):
 
 
 def _forward_state_path() -> Path:
-    return Path(
-        os.environ.get("LEVEL_TRADER_FORWARD_STATE", "/home/ubuntu/.level_trader/forward_state.json")
+    """Resolve where to persist forward-test state.
+
+    Priority:
+    1. ``LEVEL_TRADER_FORWARD_STATE`` env var (explicit path).
+    2. ``/data/forward_state.json`` when ``/data`` is writable (Fly.io volume).
+    3. ``~/.level_trader/forward_state.json`` (local dev).
+    """
+    override = os.environ.get("LEVEL_TRADER_FORWARD_STATE")
+    if override:
+        return Path(override)
+    fly_volume = Path("/data")
+    if fly_volume.is_dir() and os.access(fly_volume, os.W_OK):
+        return fly_volume / "forward_state.json"
+    return Path.home() / ".level_trader" / "forward_state.json"
+
+
+def _default_forward_config() -> ForwardConfig:
+    """Build a ForwardConfig from LEVEL_TRADER_FORWARD_* env vars (if any)."""
+
+    def fget(name: str, default: float) -> float:
+        val = os.environ.get(name)
+        if val is None:
+            return default
+        try:
+            return float(val)
+        except ValueError:
+            return default
+
+    def iget(name: str, default: int) -> int:
+        return int(fget(name, default))
+
+    return ForwardConfig(
+        bankroll=fget("LEVEL_TRADER_FORWARD_BANKROLL", 500.0),
+        stake=fget("LEVEL_TRADER_FORWARD_STAKE", 10.0),
+        taker_fee=fget("LEVEL_TRADER_FORWARD_TAKER_FEE", 0.01),
+        slippage=fget("LEVEL_TRADER_FORWARD_SLIPPAGE", 0.005),
+        poll_interval_s=iget("LEVEL_TRADER_FORWARD_POLL_INTERVAL_S", 120),
+        max_tracked_markets=iget("LEVEL_TRADER_FORWARD_MAX_MARKETS", 20),
+        min_volume=fget("LEVEL_TRADER_FORWARD_MIN_VOLUME", 50_000.0),
+        min_hours_to_close=fget("LEVEL_TRADER_FORWARD_MIN_HOURS", 6.0),
+        max_hours_to_close=fget("LEVEL_TRADER_FORWARD_MAX_HOURS", 24.0 * 30),
+        ewma_halflife_ticks=iget("LEVEL_TRADER_FORWARD_EWMA_HL", 10),
+        warmup_ticks=iget("LEVEL_TRADER_FORWARD_WARMUP", 5),
+        entry_threshold=fget("LEVEL_TRADER_FORWARD_ENTRY", 0.05),
+        stop_threshold=fget("LEVEL_TRADER_FORWARD_STOP", 0.12),
+        max_hold_ticks=iget("LEVEL_TRADER_FORWARD_MAX_HOLD", 60),
+        cooldown_ticks=iget("LEVEL_TRADER_FORWARD_COOLDOWN", 3),
     )
 
 
@@ -219,8 +264,51 @@ class _ForwardRuntime:
     worker: ForwardWorker | None = None
 
 
+def _maybe_autostart_forward() -> None:
+    """Auto-start the forward worker on app startup if enabled via env.
+
+    Set ``LEVEL_TRADER_FORWARD_AUTOSTART=1`` to enable. Useful for PaaS
+    deployments where we want the worker ticking as soon as the container
+    boots.
+    """
+    flag = os.environ.get("LEVEL_TRADER_FORWARD_AUTOSTART", "").lower()
+    if flag in {"0", "false", "no"}:
+        return
+    # Default: autostart when running on Fly.io (FLY_APP_NAME is auto-set).
+    if flag not in {"1", "true", "yes"} and not os.environ.get("FLY_APP_NAME"):
+        return
+    if _ForwardRuntime.worker is not None and _ForwardRuntime.worker.is_running():
+        return
+    cfg = _default_forward_config()
+    path = _forward_state_path()
+    state = load_state(path, cfg=cfg)
+    state.cfg = cfg
+    worker = ForwardWorker(path, state)
+    _ForwardRuntime.worker = worker
+    worker.start()
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="polymarket-dashboard", version="0.1.0")
+
+    @app.on_event("startup")
+    def _on_startup() -> None:
+        _maybe_autostart_forward()
+
+    @app.on_event("shutdown")
+    def _on_shutdown() -> None:
+        worker = _ForwardRuntime.worker
+        if worker is not None and worker.is_running():
+            worker.stop()
+
+    @app.get("/healthz")
+    def healthz() -> dict:
+        worker = _ForwardRuntime.worker
+        return {
+            "ok": True,
+            "forward_running": bool(worker and worker.is_running()),
+            "poll_count": worker.state.poll_count if worker else 0,
+        }
 
     @app.get("/", response_class=HTMLResponse)
     def index() -> str:
