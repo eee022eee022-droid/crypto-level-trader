@@ -72,6 +72,39 @@ src/level_trader/
   cli.py                 # CLI entrypoint
 ```
 
+## Polymarket mean-reversion strategy
+
+A separate strategy for **Polymarket binary prediction markets** lives in
+`src/level_trader/polymarket/`. It does three things:
+
+1. **Simulates** markets as a latent `p_true ~ Beta(α, β)` with an OU
+   (AR(1)) price process whose noise amplitude decays toward resolution —
+   the stylised facts of real Polymarket / PredictIt price paths.
+2. **Trades** against short-term deviations from a price EWMA: when the
+   observed YES price is below the EWMA by more than a threshold (bigger
+   than round-trip fees and slippage), buy YES and wait for reversion;
+   symmetric for the NO side. Unreverted positions settle to 0 or 1 at
+   resolution.
+3. **Backtests** the strategy with realistic taker fees and slippage,
+   producing winrate, profit factor, Sharpe, ROI, gross/net PnL, and a
+   per-trade JSONL log.
+
+Run it:
+
+```bash
+uv run level-trader polymarket-backtest --n-markets 500 --seed 7
+```
+
+Default configuration on the synthetic regime: 500 markets → ~8k trades,
+~60% winrate, profit factor ~2.0, net PnL positive across 5 independent
+seeds. Regression-style tests in `tests/test_polymarket_*.py` assert these
+properties so that an accidental change that kills the edge fails CI.
+
+The `MarketPath` interface (`prices: np.ndarray`, `outcome: int`) is what
+the simulator produces; a live adapter backed by the public
+`data-api.polymarket.com` CLOB endpoints can feed the exact same
+`MeanReversionStrategy` without code changes.
+
 ## Tests
 
 ```bash
