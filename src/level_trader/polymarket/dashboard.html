@@ -1,0 +1,591 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Polymarket mean-reversion dashboard</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0f1115;
+    --panel: #161a22;
+    --panel2: #1d222c;
+    --border: #262c38;
+    --text: #e6e8ee;
+    --muted: #8b93a7;
+    --accent: #4f8cff;
+    --green: #2bd67b;
+    --red: #ff5470;
+    --yellow: #f6c84c;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    background: var(--bg); color: var(--text);
+    font: 13px/1.45 -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif;
+  }
+  header {
+    padding: 16px 22px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .3px; }
+  header .muted { color: var(--muted); font-size: 12px; }
+  main { display: grid; grid-template-columns: 280px 1fr; gap: 16px; padding: 16px 22px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 14px;
+  }
+  .panel h2 { font-size: 12px; margin: 0 0 10px; text-transform: uppercase; color: var(--muted); letter-spacing: .8px; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; }
+  label { display: flex; flex-direction: column; font-size: 11px; color: var(--muted); gap: 4px; }
+  input[type="number"] {
+    background: var(--panel2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 4px; padding: 6px 8px; font-size: 12px; font-variant-numeric: tabular-nums;
+  }
+  button {
+    background: var(--accent); color: white; border: 0; border-radius: 6px;
+    padding: 8px 12px; font-weight: 600; cursor: pointer; font-size: 12px;
+  }
+  button:disabled { opacity: .6; cursor: wait; }
+  button.secondary { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+  .row { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+  .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
+  .kpi {
+    background: var(--panel2); border-radius: 6px; padding: 10px 12px;
+  }
+  .kpi .label { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .6px; }
+  .kpi .value { font-size: 20px; font-weight: 600; margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .value.pos { color: var(--green); } .value.neg { color: var(--red); }
+  .chart-wrap { position: relative; height: 300px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 12px; }
+  th, td { text-align: right; padding: 6px 8px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; text-align: right; font-size: 11px; text-transform: uppercase; letter-spacing: .5px; }
+  th:first-child, td:first-child { text-align: left; }
+  td.side-yes { color: var(--green); }
+  td.side-no { color: var(--red); }
+  td.pnl-pos { color: var(--green); }
+  td.pnl-neg { color: var(--red); }
+  .table-wrap { max-height: 420px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
+  .badge { display: inline-block; padding: 1px 6px; border-radius: 99px; font-size: 10px; border: 1px solid var(--border); color: var(--muted); }
+  .status { color: var(--muted); font-size: 11px; }
+  .tab-btn { background: transparent; color: var(--muted); border: 1px solid var(--border); }
+  .tab-btn.active { background: var(--accent); color: white; border-color: var(--accent); }
+  button.danger { background: var(--red); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 6px; vertical-align: middle; }
+  .dot.running { background: var(--green); animation: pulse 1.8s ease-in-out infinite; }
+  .dot.stopped { background: var(--red); }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .mkt-question { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Polymarket mean-reversion dashboard <span class="muted" id="hdr-source">· synthetic backtest</span></h1>
+  <div style="display:flex; gap:6px;">
+    <button id="tab-backtest-btn" class="tab-btn active" data-tab="backtest">Backtest</button>
+    <button id="tab-forward-btn" class="tab-btn" data-tab="forward">Forward (live paper)</button>
+  </div>
+  <div class="muted">bankroll <b>$<span id="hdr-bankroll">500</span></b> → ending <b class="pnl" id="hdr-ending">—</b></div>
+</header>
+
+<main id="tab-backtest">
+  <!-- LEFT: controls -->
+  <aside class="panel">
+    <h2>Data source</h2>
+    <div style="display:flex; gap:8px; margin-bottom:12px;">
+      <label style="flex:1; flex-direction:row; align-items:center; gap:6px; cursor:pointer;">
+        <input type="radio" name="mode" value="synthetic" checked/> Synthetic
+      </label>
+      <label style="flex:1; flex-direction:row; align-items:center; gap:6px; cursor:pointer;">
+        <input type="radio" name="mode" value="live"/> Real (Polymarket)
+      </label>
+    </div>
+    <h2>Parameters</h2>
+    <div class="grid">
+      <label>Bankroll ($)<input type="number" id="bankroll" value="500" step="50" min="10"/></label>
+      <label>Stake / trade ($)<input type="number" id="stake" value="10" step="1" min="0.1"/></label>
+      <label># markets<input type="number" id="n_markets" value="200" step="10" min="1" max="5000"/></label>
+      <label>Seed<input type="number" id="seed" value="7" step="1" min="0"/></label>
+      <label>Ticks / market<input type="number" id="steps" value="200" step="10" min="20"/></label>
+      <label>Taker fee<input type="number" id="taker_fee" value="0.01" step="0.005" min="0"/></label>
+      <label>Slippage<input type="number" id="slippage" value="0.005" step="0.001" min="0"/></label>
+      <label>EWMA half-life<input type="number" id="ewma_halflife" value="20" step="1" min="1"/></label>
+      <label>Entry threshold<input type="number" id="entry_threshold" value="0.05" step="0.005" min="0.001"/></label>
+      <label>Stop threshold<input type="number" id="stop_threshold" value="0.12" step="0.005" min="0.001"/></label>
+      <label>Max hold (ticks)<input type="number" id="max_hold" value="60" step="5" min="1"/></label>
+    </div>
+    <div id="live-params" class="grid" style="display:none; margin-top:10px; padding-top:10px; border-top:1px solid var(--border);">
+      <label>Min volume ($)<input type="number" id="min_volume" value="10000" step="1000" min="0"/></label>
+      <label>Min duration (h)<input type="number" id="min_duration_hours" value="24" step="12" min="1"/></label>
+      <label>Max age (days)<input type="number" id="max_age_days" value="30" step="5" min="1"/></label>
+      <label>Fidelity (min)<input type="number" id="fidelity_minutes" value="60" step="15" min="1"/></label>
+    </div>
+    <div class="row">
+      <button id="run-btn">Run backtest</button>
+      <span class="status" id="status"></span>
+    </div>
+    <p class="muted" style="margin-top:14px; font-size:11px;">
+      Strategy enters when the price deviates from its EWMA by more than the entry threshold and exits on reversion, stop, timeout or resolution. <b>Synthetic</b> mode generates markets programmatically (Beta p_true + OU noise). <b>Real</b> mode pulls resolved Polymarket markets from their public HTTP API and runs the same strategy on the real price paths (demo money — no orders are placed). First real-mode run can take 20–60s (rate-limited fetch).
+    </p>
+  </aside>
+
+  <!-- RIGHT: results -->
+  <section style="display: flex; flex-direction: column; gap: 16px;">
+    <div class="panel">
+      <h2>Headline metrics</h2>
+      <div class="metrics">
+        <div class="kpi"><div class="label">Ending bankroll</div><div class="value" id="m-ending">—</div></div>
+        <div class="kpi"><div class="label">Total PnL</div><div class="value" id="m-pnl">—</div></div>
+        <div class="kpi"><div class="label">ROI</div><div class="value" id="m-roi">—</div></div>
+        <div class="kpi"><div class="label">Max drawdown</div><div class="value" id="m-dd">—</div></div>
+        <div class="kpi"><div class="label">Trades</div><div class="value" id="m-trades">—</div></div>
+        <div class="kpi"><div class="label">Winrate</div><div class="value" id="m-winrate">—</div></div>
+        <div class="kpi"><div class="label">Profit factor</div><div class="value" id="m-pf">—</div></div>
+        <div class="kpi"><div class="label">Fees paid</div><div class="value" id="m-fees">—</div></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Equity curve</h2>
+      <div class="chart-wrap"><canvas id="equity-chart"></canvas></div>
+    </div>
+
+    <div class="panel">
+      <h2>Trades <span class="badge" id="trade-count">0</span></h2>
+      <div class="table-wrap">
+        <table id="trade-table">
+          <thead>
+            <tr>
+              <th>#</th><th>Market</th><th>Side</th>
+              <th>Entry tick</th><th>Entry px</th>
+              <th>Exit tick</th><th>Exit px</th>
+              <th>Reason</th><th>Stake</th><th>Fees</th><th>PnL</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+</main>
+
+<main id="tab-forward" style="display:none;">
+  <!-- LEFT: forward controls -->
+  <aside class="panel">
+    <h2>Forward worker</h2>
+    <div style="margin-bottom:10px;">
+      <span id="fwd-dot" class="dot stopped"></span><b id="fwd-status-text">stopped</b>
+      <div class="muted" style="font-size:11px;margin-top:4px;" id="fwd-meta">no state</div>
+    </div>
+    <h2>Parameters</h2>
+    <div class="grid">
+      <label>Bankroll ($)<input type="number" id="fwd_bankroll" value="500" step="50" min="10"/></label>
+      <label>Stake / trade ($)<input type="number" id="fwd_stake" value="10" step="1" min="0.1"/></label>
+      <label>Poll interval (s)<input type="number" id="fwd_poll_interval_s" value="120" step="30" min="30"/></label>
+      <label>Max markets<input type="number" id="fwd_max_tracked_markets" value="20" step="1" min="1" max="100"/></label>
+      <label>Min volume ($)<input type="number" id="fwd_min_volume" value="50000" step="5000" min="0"/></label>
+      <label>Min hrs to close<input type="number" id="fwd_min_hours_to_close" value="6" step="1" min="1"/></label>
+      <label>Max hrs to close<input type="number" id="fwd_max_hours_to_close" value="720" step="24" min="1"/></label>
+      <label>Taker fee<input type="number" id="fwd_taker_fee" value="0.01" step="0.005" min="0"/></label>
+      <label>Slippage<input type="number" id="fwd_slippage" value="0.005" step="0.001" min="0"/></label>
+      <label>EWMA HL (ticks)<input type="number" id="fwd_ewma_halflife_ticks" value="10" step="1" min="1"/></label>
+      <label>Warmup ticks<input type="number" id="fwd_warmup_ticks" value="5" step="1" min="0"/></label>
+      <label>Entry threshold<input type="number" id="fwd_entry_threshold" value="0.05" step="0.005" min="0.001"/></label>
+      <label>Stop threshold<input type="number" id="fwd_stop_threshold" value="0.12" step="0.005" min="0.001"/></label>
+      <label>Max hold ticks<input type="number" id="fwd_max_hold_ticks" value="60" step="5" min="1"/></label>
+      <label>Cooldown ticks<input type="number" id="fwd_cooldown_ticks" value="3" step="1" min="0"/></label>
+    </div>
+    <div class="row">
+      <button id="fwd-start">Start</button>
+      <button id="fwd-stop" class="danger">Stop</button>
+    </div>
+    <div class="row">
+      <button id="fwd-poll-now" class="secondary">Poll now</button>
+      <button id="fwd-reset" class="secondary">Reset &amp; restart</button>
+    </div>
+    <p class="muted" style="margin-top:14px; font-size:11px;">
+      Polls Polymarket midpoint quotes every <i>poll interval</i> seconds and runs the mean-reversion strategy live on open markets. State persists in <code>~/.level_trader/forward_state.json</code>. No orders go on-chain — virtual PnL only.
+    </p>
+  </aside>
+
+  <!-- RIGHT: forward results -->
+  <section style="display: flex; flex-direction: column; gap: 16px;">
+    <div class="panel">
+      <h2>Headline metrics</h2>
+      <div class="metrics">
+        <div class="kpi"><div class="label">Current bankroll</div><div class="value" id="fwd-m-bank">—</div></div>
+        <div class="kpi"><div class="label">Realized PnL</div><div class="value" id="fwd-m-pnl">—</div></div>
+        <div class="kpi"><div class="label">Closed trades</div><div class="value" id="fwd-m-trades">—</div></div>
+        <div class="kpi"><div class="label">Winrate</div><div class="value" id="fwd-m-winrate">—</div></div>
+        <div class="kpi"><div class="label">Profit factor</div><div class="value" id="fwd-m-pf">—</div></div>
+        <div class="kpi"><div class="label">Open positions</div><div class="value" id="fwd-m-openpos">—</div></div>
+        <div class="kpi"><div class="label">Markets tracked</div><div class="value" id="fwd-m-tracked">—</div></div>
+        <div class="kpi"><div class="label">Poll count</div><div class="value" id="fwd-m-polls">—</div></div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Equity curve (realtime)</h2>
+      <div class="chart-wrap"><canvas id="fwd-equity-chart"></canvas></div>
+    </div>
+
+    <div class="panel">
+      <h2>Open positions <span class="badge" id="fwd-open-count">0</span></h2>
+      <div class="table-wrap">
+        <table id="fwd-open-table">
+          <thead>
+            <tr>
+              <th>Market</th><th>Side</th><th>Entry px</th><th>Last px</th>
+              <th>Stake</th><th>Unrealized PnL</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Closed trades <span class="badge" id="fwd-trade-count">0</span></h2>
+      <div class="table-wrap">
+        <table id="fwd-trade-table">
+          <thead>
+            <tr>
+              <th>#</th><th>Market</th><th>Side</th>
+              <th>Entry px</th><th>Exit px</th><th>Reason</th>
+              <th>Stake</th><th>Fees</th><th>PnL</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h2>Tracked markets <span class="badge" id="fwd-tracked-count">0</span></h2>
+      <div class="table-wrap">
+        <table id="fwd-markets-table">
+          <thead>
+            <tr>
+              <th>Category</th><th>Question</th><th>Ticks</th><th>Last px</th><th>EWMA</th><th>State</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+const fmtUSD = v => (v >= 0 ? '+' : '') + '$' + v.toFixed(2);
+const fmtPct = v => (v >= 0 ? '+' : '') + (v * 100).toFixed(2) + '%';
+const cls = v => (v > 0 ? 'pos' : (v < 0 ? 'neg' : ''));
+
+function currentMode() {
+  return document.querySelector('input[name="mode"]:checked').value;
+}
+
+function collectParams() {
+  const ids = ['bankroll','stake','n_markets','seed','steps','taker_fee','slippage',
+               'ewma_halflife','entry_threshold','stop_threshold','max_hold'];
+  const p = {};
+  for (const id of ids) p[id] = parseFloat(document.getElementById(id).value);
+  for (const id of ['n_markets','seed','steps','ewma_halflife','max_hold']) p[id] = Math.floor(p[id]);
+  if (currentMode() === 'live') {
+    for (const id of ['min_volume','min_duration_hours','max_age_days','fidelity_minutes']) {
+      p[id] = parseFloat(document.getElementById(id).value);
+    }
+    p['max_age_days'] = Math.floor(p['max_age_days']);
+    p['fidelity_minutes'] = Math.floor(p['fidelity_minutes']);
+  }
+  return p;
+}
+
+function toggleLiveParams() {
+  const live = currentMode() === 'live';
+  document.getElementById('live-params').style.display = live ? 'grid' : 'none';
+  const hdr = document.getElementById('hdr-source');
+  hdr.textContent = live ? '· real Polymarket markets (paper money)' : '· synthetic backtest';
+  // Shrink n_markets default in live mode — fetching is slow
+  const n = document.getElementById('n_markets');
+  if (live && parseInt(n.value, 10) > 50) n.value = 30;
+  if (!live && parseInt(n.value, 10) < 100) n.value = 200;
+}
+
+let equityChart = null;
+
+function renderEquity(equity, drawdown) {
+  const labels = equity.map((_, i) => i);
+  if (equityChart) equityChart.destroy();
+  const ctx = document.getElementById('equity-chart').getContext('2d');
+  equityChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Bankroll ($)', data: equity, borderColor: '#4f8cff', borderWidth: 1.5,
+          pointRadius: 0, tension: 0.15, fill: false, yAxisID: 'y' },
+        { label: 'Drawdown ($)', data: drawdown, borderColor: '#ff5470', borderWidth: 1,
+          pointRadius: 0, tension: 0.1, fill: 'origin', backgroundColor: 'rgba(255,84,112,0.08)', yAxisID: 'y2' },
+      ],
+    },
+    options: {
+      animation: false,
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: { legend: { labels: { color: '#8b93a7' } } },
+      scales: {
+        x: { ticks: { color: '#8b93a7', maxTicksLimit: 10 }, grid: { color: '#262c38' } },
+        y: { ticks: { color: '#8b93a7', callback: v => '$' + v.toFixed(0) }, grid: { color: '#262c38' } },
+        y2: { position: 'right', ticks: { color: '#ff5470', callback: v => '$' + v.toFixed(0) }, grid: { display: false } },
+      },
+    },
+  });
+}
+
+function renderTrades(trades) {
+  const tbody = document.querySelector('#trade-table tbody');
+  tbody.innerHTML = '';
+  const frag = document.createDocumentFragment();
+  trades.forEach((t, i) => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${i+1}</td>
+      <td>${t.market_id}</td>
+      <td class="side-${t.side}">${t.side.toUpperCase()}</td>
+      <td>${t.entry_tick}</td>
+      <td>${t.entry_price.toFixed(4)}</td>
+      <td>${t.exit_tick ?? ''}</td>
+      <td>${t.exit_price != null ? t.exit_price.toFixed(4) : ''}</td>
+      <td>${t.exit_reason ?? ''}</td>
+      <td>${t.stake.toFixed(2)}</td>
+      <td>${t.fees_paid.toFixed(3)}</td>
+      <td class="pnl-${t.pnl > 0 ? 'pos' : (t.pnl < 0 ? 'neg' : '')}">${t.pnl >= 0 ? '+' : ''}${t.pnl.toFixed(3)}</td>
+    `;
+    frag.appendChild(tr);
+  });
+  tbody.appendChild(frag);
+  document.getElementById('trade-count').textContent = trades.length + ' trades';
+}
+
+function setMetric(id, value, signed = false, pct = false) {
+  const el = document.getElementById(id);
+  if (typeof value !== 'number' || !Number.isFinite(value)) { el.textContent = '—'; el.className = 'value'; return; }
+  el.textContent = pct ? fmtPct(value) : (signed ? fmtUSD(value) : value.toLocaleString(undefined, { maximumFractionDigits: 2 }));
+  el.className = 'value ' + (signed || pct ? cls(value) : '');
+}
+
+async function run() {
+  const btn = document.getElementById('run-btn');
+  const status = document.getElementById('status');
+  btn.disabled = true;
+  const mode = currentMode();
+  const endpoint = mode === 'live' ? '/api/run_live' : '/api/run';
+  status.textContent = mode === 'live' ? 'fetching real Polymarket history…' : 'running…';
+  const params = collectParams();
+  document.getElementById('hdr-bankroll').textContent = params.bankroll.toFixed(0);
+
+  try {
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(params),
+    });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status + ': ' + await resp.text());
+    const data = await resp.json();
+    const s = data.summary;
+    if (s.error) {
+      status.textContent = 'error: ' + s.error;
+      btn.disabled = false;
+      return;
+    }
+    setMetric('m-ending', s.ending_bankroll);
+    document.getElementById('hdr-ending').textContent = '$' + s.ending_bankroll.toFixed(2);
+    document.getElementById('hdr-ending').className = 'pnl ' + cls(s.total_pnl);
+    setMetric('m-pnl', s.total_pnl, true);
+    setMetric('m-roi', s.roi, false, true);
+    setMetric('m-dd', s.max_drawdown, true);
+    setMetric('m-trades', s.n_trades);
+    setMetric('m-winrate', s.winrate, false, true);
+    setMetric('m-pf', s.profit_factor);
+    setMetric('m-fees', s.total_fees);
+    renderEquity(data.equity, data.drawdown);
+    renderTrades(data.trades);
+    const src = s.data_source === 'polymarket_live'
+      ? `real · ${s.n_markets} markets · avg ${s.avg_ticks_per_market} ticks · ${s.n_yes_resolutions} yes / ${s.n_no_resolutions} no`
+      : `synthetic · seed=${params.seed}`;
+    status.textContent = `done · ${s.n_trades} trades · ${src}`;
+    if (s.bankroll_ever_wiped) status.textContent += ' · ⚠ bankroll hit 0';
+  } catch (e) {
+    status.textContent = 'error: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+document.getElementById('run-btn').addEventListener('click', run);
+document.querySelectorAll('input[name="mode"]').forEach(el => el.addEventListener('change', toggleLiveParams));
+toggleLiveParams();
+
+// --------------------------------------------------------------------
+// Forward (live paper) tab
+// --------------------------------------------------------------------
+
+function switchTab(tab) {
+  document.getElementById('tab-backtest').style.display = tab === 'backtest' ? 'grid' : 'none';
+  document.getElementById('tab-forward').style.display = tab === 'forward' ? 'grid' : 'none';
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+  if (tab === 'forward') refreshForward();
+}
+document.querySelectorAll('.tab-btn').forEach(b => b.addEventListener('click', () => switchTab(b.dataset.tab)));
+
+function collectForwardParams(reset) {
+  const ids = ['bankroll','stake','poll_interval_s','max_tracked_markets','min_volume','min_hours_to_close','max_hours_to_close','taker_fee','slippage','ewma_halflife_ticks','warmup_ticks','entry_threshold','stop_threshold','max_hold_ticks','cooldown_ticks'];
+  const p = {};
+  for (const id of ids) p[id] = parseFloat(document.getElementById('fwd_' + id).value);
+  for (const id of ['poll_interval_s','max_tracked_markets','ewma_halflife_ticks','warmup_ticks','max_hold_ticks','cooldown_ticks']) p[id] = Math.floor(p[id]);
+  p.reset = !!reset;
+  return p;
+}
+
+let fwdEquityChart = null;
+function renderForwardEquity(equity) {
+  const labels = equity.map(e => new Date(e.ts * 1000).toLocaleTimeString());
+  const data = equity.map(e => e.bankroll);
+  if (fwdEquityChart) fwdEquityChart.destroy();
+  const ctx = document.getElementById('fwd-equity-chart').getContext('2d');
+  fwdEquityChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{ label: 'Bankroll ($)', data, borderColor: '#4f8cff', borderWidth: 1.5, pointRadius: 0, tension: 0.15, fill: false }],
+    },
+    options: {
+      animation: false, responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { labels: { color: '#8b93a7' } } },
+      scales: {
+        x: { ticks: { color: '#8b93a7', maxTicksLimit: 10 }, grid: { color: '#262c38' } },
+        y: { ticks: { color: '#8b93a7', callback: v => '$' + v.toFixed(0) }, grid: { color: '#262c38' } },
+      },
+    },
+  });
+}
+
+function setFwdMetric(id, v, { signed=false, pct=false, int=false } = {}) {
+  const el = document.getElementById(id);
+  if (v == null || !Number.isFinite(v)) { el.textContent = '—'; el.className = 'value'; return; }
+  el.textContent = pct ? fmtPct(v) : (signed ? fmtUSD(v) : (int ? Math.round(v).toString() : v.toLocaleString(undefined, { maximumFractionDigits: 2 })));
+  el.className = 'value ' + (signed || pct ? cls(v) : '');
+}
+
+async function refreshForward() {
+  try {
+    const resp = await fetch('/api/forward/status');
+    const s = await resp.json();
+    const dot = document.getElementById('fwd-dot');
+    const txt = document.getElementById('fwd-status-text');
+    dot.className = 'dot ' + (s.running ? 'running' : 'stopped');
+    txt.textContent = s.running ? 'running' : 'stopped';
+    const lt = s.last_tick_at ? new Date(s.last_tick_at * 1000).toLocaleTimeString() : '—';
+    document.getElementById('fwd-meta').textContent = `polls ${s.poll_count} · last tick ${lt}${s.last_error ? ' · err: ' + s.last_error : ''}`;
+
+    setFwdMetric('fwd-m-bank', s.bankroll_current);
+    setFwdMetric('fwd-m-pnl', s.realized_pnl, { signed: true });
+    setFwdMetric('fwd-m-trades', s.n_closed_trades, { int: true });
+    setFwdMetric('fwd-m-winrate', s.winrate, { pct: true });
+    setFwdMetric('fwd-m-pf', s.profit_factor);
+    setFwdMetric('fwd-m-openpos', s.n_open_positions, { int: true });
+    setFwdMetric('fwd-m-tracked', s.n_tracked_markets, { int: true });
+    setFwdMetric('fwd-m-polls', s.poll_count, { int: true });
+
+    renderForwardEquity(s.equity || []);
+
+    const openBody = document.querySelector('#fwd-open-table tbody');
+    openBody.innerHTML = '';
+    (s.open_positions || []).forEach(p => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td class="mkt-question" title="${p.question}">${p.question}</td>
+        <td class="side-${p.side}">${p.side.toUpperCase()}</td>
+        <td>${p.entry_price.toFixed(4)}</td>
+        <td>${p.last_price.toFixed(4)}</td>
+        <td>${p.stake.toFixed(2)}</td>
+        <td class="pnl-${p.unrealized_pnl > 0 ? 'pos' : (p.unrealized_pnl < 0 ? 'neg' : '')}">${p.unrealized_pnl >= 0 ? '+' : ''}${p.unrealized_pnl.toFixed(3)}</td>
+      `;
+      openBody.appendChild(tr);
+    });
+    document.getElementById('fwd-open-count').textContent = (s.open_positions || []).length + ' open';
+
+    const trBody = document.querySelector('#fwd-trade-table tbody');
+    trBody.innerHTML = '';
+    (s.closed_trades || []).slice().reverse().forEach((t, i) => {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `
+        <td>${i+1}</td>
+        <td class="mkt-question" title="${t.question}">${t.question}</td>
+        <td class="side-${t.side}">${t.side.toUpperCase()}</td>
+        <td>${t.entry_price.toFixed(4)}</td>
+        <td>${t.exit_price.toFixed(4)}</td>
+        <td>${t.exit_reason}</td>
+        <td>${t.stake.toFixed(2)}</td>
+        <td>${t.fees_paid.toFixed(3)}</td>
+        <td class="pnl-${t.pnl > 0 ? 'pos' : (t.pnl < 0 ? 'neg' : '')}">${t.pnl >= 0 ? '+' : ''}${t.pnl.toFixed(3)}</td>
+      `;
+      trBody.appendChild(tr);
+    });
+    document.getElementById('fwd-trade-count').textContent = (s.closed_trades || []).length + ' trades';
+
+    const mkBody = document.querySelector('#fwd-markets-table tbody');
+    mkBody.innerHTML = '';
+    (s.tracked_markets || []).forEach(m => {
+      const tr = document.createElement('tr');
+      const state = m.resolved ? `resolved ${m.outcome == null ? '' : (m.outcome ? 'YES' : 'NO')}` : (m.has_open ? 'in-trade' : 'watching');
+      const tag = m.tag_slug || '—';
+      tr.innerHTML = `
+        <td><span class="badge">${tag}</span></td>
+        <td class="mkt-question" title="${m.event_title || m.question}">${m.question}</td>
+        <td>${m.ticks}</td>
+        <td>${m.last_price != null ? m.last_price.toFixed(4) : '—'}</td>
+        <td>${m.ewma != null ? m.ewma.toFixed(4) : '—'}</td>
+        <td>${state}</td>
+      `;
+      mkBody.appendChild(tr);
+    });
+    const tagCounts = s.tag_counts || {};
+    const breakdown = Object.entries(tagCounts).sort((a,b)=>b[1]-a[1]).map(([k,v]) => `${k}:${v}`).join(' · ');
+    document.getElementById('fwd-tracked-count').textContent =
+      (s.tracked_markets || []).length + ' markets' + (breakdown ? ' — ' + breakdown : '');
+  } catch (e) {
+    console.error('refreshForward', e);
+  }
+}
+
+async function forwardCommand(url, body) {
+  try {
+    const opts = { method: 'POST' };
+    if (body) { opts.headers = { 'content-type': 'application/json' }; opts.body = JSON.stringify(body); }
+    const resp = await fetch(url, opts);
+    if (!resp.ok) throw new Error('HTTP ' + resp.status + ': ' + await resp.text());
+    await refreshForward();
+  } catch (e) {
+    alert(e.message);
+  }
+}
+
+document.getElementById('fwd-start').addEventListener('click', () => forwardCommand('/api/forward/start', collectForwardParams(false)));
+document.getElementById('fwd-reset').addEventListener('click', () => forwardCommand('/api/forward/start', collectForwardParams(true)));
+document.getElementById('fwd-stop').addEventListener('click', () => forwardCommand('/api/forward/stop'));
+document.getElementById('fwd-poll-now').addEventListener('click', () => forwardCommand('/api/forward/poll_now'));
+
+// Poll dashboard state every 15s while on the forward tab.
+setInterval(() => {
+  if (document.getElementById('tab-forward').style.display !== 'none') refreshForward();
+}, 15000);
+
+// auto-run on page load
+run();
+</script>
+</body>
+</html>

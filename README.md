@@ -72,6 +72,88 @@ src/level_trader/
   cli.py                 # CLI entrypoint
 ```
 
+## Polymarket mean-reversion strategy
+
+A separate strategy for **Polymarket binary prediction markets** lives in
+`src/level_trader/polymarket/`. It does three things:
+
+1. **Simulates** markets as a latent `p_true ~ Beta(α, β)` with an OU
+   (AR(1)) price process whose noise amplitude decays toward resolution —
+   the stylised facts of real Polymarket / PredictIt price paths.
+2. **Trades** against short-term deviations from a price EWMA: when the
+   observed YES price is below the EWMA by more than a threshold (bigger
+   than round-trip fees and slippage), buy YES and wait for reversion;
+   symmetric for the NO side. Unreverted positions settle to 0 or 1 at
+   resolution.
+3. **Backtests** the strategy with realistic taker fees and slippage,
+   producing winrate, profit factor, Sharpe, ROI, gross/net PnL, and a
+   per-trade JSONL log.
+
+Run it:
+
+```bash
+uv run level-trader polymarket-backtest --n-markets 500 --seed 7
+```
+
+Default configuration on the synthetic regime: 500 markets → ~8k trades,
+~60% winrate, profit factor ~2.0, net PnL positive across 5 independent
+seeds. Regression-style tests in `tests/test_polymarket_*.py` assert these
+properties so that an accidental change that kills the edge fails CI.
+
+The `MarketPath` interface (`prices: np.ndarray`, `outcome: int`) is what
+the simulator produces; a live adapter backed by the public
+`data-api.polymarket.com` CLOB endpoints can feed the exact same
+`MeanReversionStrategy` without code changes.
+
+### Live dashboard
+
+A single-page FastAPI dashboard lets you watch the backtest, every trade
+and the equity curve in the browser:
+
+```bash
+uv run uvicorn level_trader.polymarket.dashboard:app --host 127.0.0.1 --port 8765
+# then open http://127.0.0.1:8765/
+```
+
+The default form starts from a $500 bankroll with a $10 stake per trade
+and auto-runs on load. Inputs for bankroll, stake, seed, number of
+markets, fees, slippage and the strategy thresholds are all editable —
+click *Run backtest* to replay with different knobs. The bottom table is
+the full per-trade blotter (side, entry/exit ticks and prices, exit
+reason, fees, PnL).
+
+#### Data sources
+
+Each run can be driven by one of two market-data sources, selected by the
+"Data source" radio in the sidebar:
+
+- **Synthetic** — programmatic simulator (Beta + OU noise). Deterministic,
+  fast, and the regime used by the regression tests.
+- **Real (Polymarket)** — fetches resolved markets from the public
+  `gamma-api.polymarket.com` and `clob.polymarket.com/prices-history`
+  endpoints and runs the same strategy on the real price paths. No orders
+  are placed — this is paper trading on real data. Polymarket only retains
+  CLOB price history for a limited window (~60 days), so `max_age_days`
+  defaults to 30.
+
+### Forward paper-trading (live)
+
+The dashboard also exposes a **Forward** tab that continuously polls open
+Polymarket markets in real time and runs the mean-reversion strategy
+against live midpoint quotes from `clob.polymarket.com/midpoint`. Trades
+are still virtual — the engine only *reads* prices, and every fill,
+stop-loss and settlement is computed locally. State (tracked markets,
+open positions, closed trades, equity curve) is persisted to
+`~/.level_trader/forward_state.json` so you can restart the process
+without losing history.
+
+Controls: **Start**, **Stop**, **Reset & restart**, **Poll now** (force a
+single tick without waiting for the interval).
+
+For a long-lived forward test, run the same dashboard on a server that
+stays up (VPS, home machine, etc.) — the state file is the only thing
+you need to carry between environments.
+
 ## Tests
 
 ```bash

@@ -19,6 +19,7 @@ from .config import Config
 from .exchange.gate import GateFutures
 from .exchange.universe import select_universe
 from .levels.detector import detect_levels, ohlcv_to_df
+from .polymarket import BacktestConfig, MeanReversionConfig, SimulatorConfig, run_backtest
 from .trader import Trader
 
 console = Console()
@@ -103,6 +104,62 @@ def _cmd_universe(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_polymarket_backtest(args: argparse.Namespace) -> int:
+    _setup_logging("INFO")
+    cfg = BacktestConfig(
+        n_markets=args.n_markets,
+        seed=args.seed,
+        taker_fee=args.taker_fee,
+        slippage=args.slippage,
+        starting_bankroll=args.bankroll,
+        simulator=SimulatorConfig(steps=args.steps),
+        strategy=MeanReversionConfig(
+            ewma_halflife=args.ewma_halflife,
+            entry_threshold=args.entry_threshold,
+            stop_threshold=args.stop_threshold,
+            max_hold_ticks=args.max_hold,
+            stake_per_trade=args.stake,
+        ),
+    )
+    result = run_backtest(cfg)
+    summary = result.summary()
+
+    table = Table(title=f"Polymarket backtest ({summary['n_markets']} markets, seed={cfg.seed})")
+    table.add_column("metric")
+    table.add_column("value", justify="right")
+    for key, value in summary.items():
+        table.add_row(key, str(value))
+    console.print(table)
+
+    if args.trade_log:
+        path = Path(args.trade_log)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w") as f:
+            for trade in result.trades:
+                f.write(
+                    json.dumps(
+                        {
+                            "market_id": trade.market_id,
+                            "side": trade.side,
+                            "entry_tick": trade.entry_tick,
+                            "entry_price": trade.entry_price,
+                            "exit_tick": trade.exit_tick,
+                            "exit_price": trade.exit_price,
+                            "exit_reason": trade.exit_reason,
+                            "stake": trade.stake,
+                            "quantity": trade.quantity,
+                            "fees_paid": trade.fees_paid,
+                            "pnl": trade.pnl,
+                        }
+                    )
+                    + "\n"
+                )
+        console.print(f"wrote {len(result.trades)} trades to {path}")
+
+    # Exit non-zero so CI / shell callers can flag regressions.
+    return 0 if result.total_pnl > 0 else 1
+
+
 def _cmd_report(args: argparse.Namespace) -> int:
     path = Path(args.trade_log)
     if not path.exists():
@@ -147,6 +204,28 @@ def main(argv: list[str] | None = None) -> int:
     p_r = sub.add_parser("report", help="summarize a run from the trade log")
     p_r.add_argument("--trade-log", default="runs/trades.jsonl")
     p_r.set_defaults(func=_cmd_report)
+
+    p_pm = sub.add_parser(
+        "polymarket-backtest",
+        help="backtest the Polymarket mean-reversion strategy on synthetic markets",
+    )
+    p_pm.add_argument("--n-markets", type=int, default=500)
+    p_pm.add_argument("--seed", type=int, default=7)
+    p_pm.add_argument("--steps", type=int, default=200, help="ticks per market")
+    p_pm.add_argument("--taker-fee", type=float, default=0.01)
+    p_pm.add_argument("--slippage", type=float, default=0.005)
+    p_pm.add_argument("--bankroll", type=float, default=10_000.0)
+    p_pm.add_argument("--ewma-halflife", type=int, default=20)
+    p_pm.add_argument("--entry-threshold", type=float, default=0.05)
+    p_pm.add_argument("--stop-threshold", type=float, default=0.12)
+    p_pm.add_argument("--max-hold", type=int, default=60)
+    p_pm.add_argument("--stake", type=float, default=100.0)
+    p_pm.add_argument(
+        "--trade-log",
+        default="runs/polymarket_trades.jsonl",
+        help="where to write per-trade JSONL (pass empty string to skip)",
+    )
+    p_pm.set_defaults(func=_cmd_polymarket_backtest)
 
     args = parser.parse_args(argv)
     return args.func(args)
