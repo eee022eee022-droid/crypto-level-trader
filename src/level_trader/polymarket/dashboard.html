@@ -267,7 +267,7 @@
         <table id="fwd-markets-table">
           <thead>
             <tr>
-              <th>Question</th><th>Ticks</th><th>Last px</th><th>EWMA</th><th>State</th>
+              <th>Category</th><th>Question</th><th>Ticks</th><th>Last px</th><th>EWMA</th><th>State</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -542,8 +542,10 @@ async function refreshForward() {
     (s.tracked_markets || []).forEach(m => {
       const tr = document.createElement('tr');
       const state = m.resolved ? `resolved ${m.outcome == null ? '' : (m.outcome ? 'YES' : 'NO')}` : (m.has_open ? 'in-trade' : 'watching');
+      const tag = m.tag_slug || '—';
       tr.innerHTML = `
-        <td class="mkt-question" title="${m.question}">${m.question}</td>
+        <td><span class="badge">${tag}</span></td>
+        <td class="mkt-question" title="${m.event_title || m.question}">${m.question}</td>
         <td>${m.ticks}</td>
         <td>${m.last_price != null ? m.last_price.toFixed(4) : '—'}</td>
         <td>${m.ewma != null ? m.ewma.toFixed(4) : '—'}</td>
@@ -551,7 +553,10 @@ async function refreshForward() {
       `;
       mkBody.appendChild(tr);
     });
-    document.getElementById('fwd-tracked-count').textContent = (s.tracked_markets || []).length + ' markets';
+    const tagCounts = s.tag_counts || {};
+    const breakdown = Object.entries(tagCounts).sort((a,b)=>b[1]-a[1]).map(([k,v]) => `${k}:${v}`).join(' · ');
+    document.getElementById('fwd-tracked-count').textContent =
+      (s.tracked_markets || []).length + ' markets' + (breakdown ? ' — ' + breakdown : '');
   } catch (e) {
     console.error('refreshForward', e);
   }

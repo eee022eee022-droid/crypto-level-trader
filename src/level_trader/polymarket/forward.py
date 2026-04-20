@@ -31,9 +31,26 @@ from typing import Any
 log = logging.getLogger(__name__)
 
 _GAMMA_URL = "https://gamma-api.polymarket.com/markets"
+_GAMMA_EVENTS_URL = "https://gamma-api.polymarket.com/events"
 _CLOB_MIDPOINT_URL = "https://clob.polymarket.com/midpoint"
 _USER_AGENT = "level-trader-polymarket-adapter/0.1"
 _HTTP_TIMEOUT = 15.0
+
+# Default basket of Polymarket tag slugs to diversify across verticals.
+# Politics is intentionally last so it doesn't dominate the round-robin.
+DEFAULT_TAG_SLUGS: tuple[str, ...] = (
+    "sports",
+    "crypto",
+    "pop-culture",
+    "business",
+    "tech",
+    "science",
+    "weather",
+    "entertainment",
+    "mentions",
+    "economics",
+    "politics",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +72,12 @@ class ForwardConfig:
     min_volume: float = 50_000.0
     min_hours_to_close: float = 6.0
     max_hours_to_close: float = 24.0 * 30
+
+    # Tag slugs to round-robin across (diversifies beyond "politics").
+    # Empty tuple = fall back to the legacy top-volume global scan.
+    tag_slugs: tuple[str, ...] = DEFAULT_TAG_SLUGS
+    # How many events per tag to scan (each event fans out to many markets).
+    events_per_tag: int = 20
 
     # Strategy knobs — units are *poll ticks*, not minutes.
     ewma_halflife_ticks: int = 10
@@ -108,6 +131,8 @@ class MarketState:
     cooldown_until_tick: int = 0
     resolved: bool = False
     outcome: int | None = None  # 0 or 1 when resolved
+    tag_slug: str = ""  # originating tag slug (sports, crypto, politics, ...)
+    event_title: str = ""  # parent event label for grouping in the UI
 
 
 @dataclass
@@ -154,48 +179,129 @@ def _parse_iso(s: str | None) -> int | None:
         return None
 
 
-def fetch_open_markets(cfg: ForwardConfig) -> list[dict]:
-    """Return currently open Polymarket markets matching ``cfg`` filters."""
-    now = int(time.time())
-    page = _http_get(
-        _GAMMA_URL,
-        {
-            "closed": "false",
-            "active": "true",
-            "archived": "false",
-            "limit": "200",
-            "order": "volumeNum",
-            "ascending": "false",
-        },
-    )
-    if not isinstance(page, list):
+def _market_passes_filters(m: dict, cfg: ForwardConfig, now: int) -> bool:
+    if m.get("closed") or m.get("archived"):
+        return False
+    if m.get("active") is False:
+        return False
+    end_ts = _parse_iso(m.get("endDate"))
+    if end_ts is None or end_ts <= now:
+        return False
+    hours_to_close = (end_ts - now) / 3600.0
+    if hours_to_close < cfg.min_hours_to_close:
+        return False
+    if hours_to_close > cfg.max_hours_to_close:
+        return False
+    try:
+        vol = float(m.get("volumeNum") or 0.0)
+    except (TypeError, ValueError):
+        vol = 0.0
+    if vol < cfg.min_volume:
+        return False
+    tokens_raw = m.get("clobTokenIds") or "[]"
+    try:
+        tokens = json.loads(tokens_raw)
+    except (json.JSONDecodeError, TypeError):
+        return False
+    return bool(tokens)
+
+
+def _fetch_markets_by_tag(tag_slug: str, cfg: ForwardConfig, now: int) -> list[dict]:
+    """Pull events for a single tag and flatten into their constituent markets."""
+    try:
+        events = _http_get(
+            _GAMMA_EVENTS_URL,
+            {
+                "closed": "false",
+                "active": "true",
+                "archived": "false",
+                "tag_slug": tag_slug,
+                "limit": str(cfg.events_per_tag),
+                "order": "volume",
+                "ascending": "false",
+            },
+        )
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as e:
+        log.warning("events tag=%s fetch failed: %s", tag_slug, e)
+        return []
+    if not isinstance(events, list):
         return []
     out: list[dict] = []
-    for m in page:
-        end_ts = _parse_iso(m.get("endDate"))
-        if end_ts is None or end_ts <= now:
-            continue
-        hours_to_close = (end_ts - now) / 3600.0
-        if hours_to_close < cfg.min_hours_to_close:
-            continue
-        if hours_to_close > cfg.max_hours_to_close:
-            continue
-        try:
-            vol = float(m.get("volumeNum") or 0.0)
-        except (TypeError, ValueError):
-            vol = 0.0
-        if vol < cfg.min_volume:
-            continue
-        tokens_raw = m.get("clobTokenIds") or "[]"
-        try:
-            tokens = json.loads(tokens_raw)
-        except (json.JSONDecodeError, TypeError):
-            continue
-        if not tokens:
-            continue
-        out.append(m)
-        if len(out) >= cfg.max_tracked_markets * 3:
-            break
+    for ev in events:
+        # Fan out into the event's markets and annotate each with the tag it
+        # came from so downstream code can group / display it.
+        for m in ev.get("markets") or []:
+            if not _market_passes_filters(m, cfg, now):
+                continue
+            m = dict(m)
+            m["_tag_slug"] = tag_slug
+            m.setdefault("_event_title", ev.get("title") or ev.get("slug"))
+            out.append(m)
+    return out
+
+
+def _fetch_top_volume_markets(cfg: ForwardConfig, now: int) -> list[dict]:
+    """Legacy fallback: global scan ordered by 24h volume."""
+    try:
+        page = _http_get(
+            _GAMMA_URL,
+            {
+                "closed": "false",
+                "active": "true",
+                "archived": "false",
+                "limit": "200",
+                "order": "volumeNum",
+                "ascending": "false",
+            },
+        )
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError) as e:
+        log.warning("gamma fallback fetch failed: %s", e)
+        return []
+    if not isinstance(page, list):
+        return []
+    return [dict(m, _tag_slug="top_volume") for m in page if _market_passes_filters(m, cfg, now)]
+
+
+def fetch_open_markets(cfg: ForwardConfig) -> list[dict]:
+    """Return currently open Polymarket markets matching ``cfg`` filters.
+
+    Strategy: for each configured tag slug, pull the top events by volume,
+    flatten into markets, then round-robin across tags so no single vertical
+    dominates the tracked basket. Falls back to a global volume scan if no
+    tags are configured.
+    """
+    now = int(time.time())
+    if not cfg.tag_slugs:
+        return _fetch_top_volume_markets(cfg, now)
+
+    per_tag: list[list[dict]] = []
+    for tag in cfg.tag_slugs:
+        per_tag.append(_fetch_markets_by_tag(tag, cfg, now))
+
+    # Round-robin so e.g. sports[0], crypto[0], ..., sports[1], crypto[1], ...
+    seen_ids: set[str] = set()
+    out: list[dict] = []
+    cap = max(cfg.max_tracked_markets * 3, cfg.max_tracked_markets + 10)
+    exhausted = False
+    idx = 0
+    while not exhausted and len(out) < cap:
+        exhausted = True
+        for bucket in per_tag:
+            if idx >= len(bucket):
+                continue
+            exhausted = False
+            m = bucket[idx]
+            mid = str(m.get("id") or m.get("conditionId") or "")
+            if mid and mid not in seen_ids:
+                seen_ids.add(mid)
+                out.append(m)
+                if len(out) >= cap:
+                    break
+        idx += 1
+
+    if not out:
+        # Any tag slugs unknown / temporarily 404 — fall back to global scan.
+        return _fetch_top_volume_markets(cfg, now)
     return out
 
 
@@ -421,6 +527,8 @@ def poll_once(state: ForwardState) -> None:
             slug=str(m.get("slug", "")),
             end_ts=_parse_iso(m.get("endDate")),
             first_seen_ts=now,
+            tag_slug=str(m.get("_tag_slug", "")),
+            event_title=str(m.get("_event_title", ""))[:200],
         )
         tracked_open += 1
 
@@ -498,6 +606,8 @@ def state_from_json(text: str) -> ForwardState:
             cooldown_until_tick=mr.get("cooldown_until_tick", 0),
             resolved=mr.get("resolved", False),
             outcome=mr.get("outcome"),
+            tag_slug=mr.get("tag_slug", ""),
+            event_title=mr.get("event_title", ""),
         )
     closed_trades = [ForwardTrade(**t) for t in raw.get("closed_trades") or []]
     equity = [tuple(e) for e in raw.get("equity_snapshots") or []]
@@ -607,7 +717,10 @@ def snapshot(state: ForwardState) -> dict:
         )
 
     tracked = []
+    tag_counts: dict[str, int] = {}
     for mkt in state.markets.values():
+        tag = mkt.tag_slug or "unknown"
+        tag_counts[tag] = tag_counts.get(tag, 0) + 1
         tracked.append(
             {
                 "market_id": mkt.market_id,
@@ -619,6 +732,8 @@ def snapshot(state: ForwardState) -> dict:
                 "resolved": mkt.resolved,
                 "outcome": mkt.outcome,
                 "end_ts": mkt.end_ts,
+                "tag_slug": mkt.tag_slug,
+                "event_title": mkt.event_title,
             }
         )
 
@@ -647,6 +762,7 @@ def snapshot(state: ForwardState) -> dict:
         "n_open_positions": len(open_positions),
         "open_positions": open_positions,
         "tracked_markets": tracked,
+        "tag_counts": tag_counts,
         "closed_trades": closed,
         "equity": [{"ts": ts, "bankroll": bk} for ts, bk in state.equity_snapshots],
         "cfg": asdict(state.cfg),
