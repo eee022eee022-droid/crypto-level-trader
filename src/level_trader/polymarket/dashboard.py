@@ -10,13 +10,15 @@ No live order routing: this is a synthetic backtest viewer.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from .backtest import BacktestConfig, BacktestResult, run_backtest, run_backtest_on_markets
+from .forward import ForwardConfig, ForwardWorker, load_state
 from .live_data import LiveFetchConfig, fetch_resolved_markets
 from .simulator import MarketPath, SimulatorConfig
 from .strategy import MeanReversionConfig, Trade
@@ -157,6 +159,66 @@ def _fetch_live_markets_cached(req: LiveRunRequest) -> list[MarketPath]:
     return markets
 
 
+# ---------------------------------------------------------------------------
+# Forward paper-trading state + controls
+# ---------------------------------------------------------------------------
+
+
+class ForwardStartRequest(BaseModel):
+    """Start (or reconfigure) the forward paper-trading worker."""
+
+    bankroll: float = Field(500.0, gt=0.0)
+    stake: float = Field(10.0, gt=0.0)
+    taker_fee: float = Field(0.01, ge=0.0, le=0.5)
+    slippage: float = Field(0.005, ge=0.0, le=0.5)
+    poll_interval_s: int = Field(120, ge=30, le=3600)
+    max_tracked_markets: int = Field(20, ge=1, le=100)
+    min_volume: float = Field(50_000.0, ge=0.0)
+    min_hours_to_close: float = Field(6.0, gt=0.0)
+    max_hours_to_close: float = Field(24.0 * 30, gt=0.0)
+    ewma_halflife_ticks: int = Field(10, ge=1, le=500)
+    warmup_ticks: int = Field(5, ge=0, le=500)
+    entry_threshold: float = Field(0.05, gt=0.0, lt=0.5)
+    stop_threshold: float = Field(0.12, gt=0.0, lt=0.9)
+    max_hold_ticks: int = Field(60, ge=1, le=5000)
+    cooldown_ticks: int = Field(3, ge=0, le=500)
+    reset: bool = Field(
+        False, description="If true, wipe state and start fresh even if a state file exists."
+    )
+
+
+def _forward_state_path() -> Path:
+    return Path(
+        os.environ.get("LEVEL_TRADER_FORWARD_STATE", "/home/ubuntu/.level_trader/forward_state.json")
+    )
+
+
+def _forward_config_from_req(req: ForwardStartRequest) -> ForwardConfig:
+    return ForwardConfig(
+        bankroll=req.bankroll,
+        stake=req.stake,
+        taker_fee=req.taker_fee,
+        slippage=req.slippage,
+        poll_interval_s=req.poll_interval_s,
+        max_tracked_markets=req.max_tracked_markets,
+        min_volume=req.min_volume,
+        min_hours_to_close=req.min_hours_to_close,
+        max_hours_to_close=req.max_hours_to_close,
+        ewma_halflife_ticks=req.ewma_halflife_ticks,
+        warmup_ticks=req.warmup_ticks,
+        entry_threshold=req.entry_threshold,
+        stop_threshold=req.stop_threshold,
+        max_hold_ticks=req.max_hold_ticks,
+        cooldown_ticks=req.cooldown_ticks,
+    )
+
+
+class _ForwardRuntime:
+    """Module-level holder for the forward worker."""
+
+    worker: ForwardWorker | None = None
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title="polymarket-dashboard", version="0.1.0")
 
@@ -199,6 +261,90 @@ def create_app() -> FastAPI:
                 "n_no_resolutions": sum(1 for m in markets if m.outcome == 0),
             },
         )
+
+    # ---- Forward paper-trading endpoints ----
+
+    @app.get("/api/forward/status")
+    def forward_status() -> dict:
+        worker = _ForwardRuntime.worker
+        if worker is None:
+            # Attempt a read-only load of existing state.
+            path = _forward_state_path()
+            if path.exists():
+                from .forward import snapshot as _snap
+
+                state = load_state(path)
+                snap = _snap(state)
+                snap["running"] = False
+                return snap
+            return {
+                "running": False,
+                "started_at": None,
+                "last_tick_at": None,
+                "poll_count": 0,
+                "last_error": None,
+                "bankroll_start": 500.0,
+                "bankroll_current": 500.0,
+                "realized_pnl": 0.0,
+                "n_closed_trades": 0,
+                "n_tracked_markets": 0,
+                "n_resolved_markets": 0,
+                "n_open_positions": 0,
+                "open_positions": [],
+                "tracked_markets": [],
+                "closed_trades": [],
+                "equity": [],
+                "cfg": None,
+            }
+        snap = worker.snapshot()
+        snap["running"] = worker.is_running()
+        return snap
+
+    @app.post("/api/forward/start")
+    def forward_start(req: ForwardStartRequest) -> dict:
+        cfg = _forward_config_from_req(req)
+        path = _forward_state_path()
+        if req.reset and path.exists():
+            path.unlink()
+        state = load_state(path, cfg=cfg)
+        state.cfg = cfg
+        worker = _ForwardRuntime.worker
+        if worker is not None and worker.is_running():
+            worker.stop()
+        worker = ForwardWorker(path, state)
+        _ForwardRuntime.worker = worker
+        worker.start()
+        snap = worker.snapshot()
+        snap["running"] = worker.is_running()
+        return snap
+
+    @app.post("/api/forward/stop")
+    def forward_stop() -> dict:
+        worker = _ForwardRuntime.worker
+        if worker is None:
+            raise HTTPException(404, "forward worker not started")
+        worker.stop()
+        snap = worker.snapshot()
+        snap["running"] = worker.is_running()
+        return snap
+
+    @app.post("/api/forward/poll_now")
+    def forward_poll_now() -> dict:
+        """Force a single poll tick without waiting for the interval.
+
+        Useful for manual testing and fast-forwarding the first tick.
+        """
+        worker = _ForwardRuntime.worker
+        if worker is None:
+            raise HTTPException(404, "forward worker not started")
+        from .forward import poll_once, save_state
+
+        with worker._lock:  # noqa: SLF001
+            poll_once(worker.state)
+            save_state(worker.state, worker.state_path)
+        snap = worker.snapshot()
+        snap["running"] = worker.is_running()
+        return snap
 
     return app
 

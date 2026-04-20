@@ -122,6 +122,38 @@ click *Run backtest* to replay with different knobs. The bottom table is
 the full per-trade blotter (side, entry/exit ticks and prices, exit
 reason, fees, PnL).
 
+#### Data sources
+
+Each run can be driven by one of two market-data sources, selected by the
+"Data source" radio in the sidebar:
+
+- **Synthetic** — programmatic simulator (Beta + OU noise). Deterministic,
+  fast, and the regime used by the regression tests.
+- **Real (Polymarket)** — fetches resolved markets from the public
+  `gamma-api.polymarket.com` and `clob.polymarket.com/prices-history`
+  endpoints and runs the same strategy on the real price paths. No orders
+  are placed — this is paper trading on real data. Polymarket only retains
+  CLOB price history for a limited window (~60 days), so `max_age_days`
+  defaults to 30.
+
+### Forward paper-trading (live)
+
+The dashboard also exposes a **Forward** tab that continuously polls open
+Polymarket markets in real time and runs the mean-reversion strategy
+against live midpoint quotes from `clob.polymarket.com/midpoint`. Trades
+are still virtual — the engine only *reads* prices, and every fill,
+stop-loss and settlement is computed locally. State (tracked markets,
+open positions, closed trades, equity curve) is persisted to
+`~/.level_trader/forward_state.json` so you can restart the process
+without losing history.
+
+Controls: **Start**, **Stop**, **Reset & restart**, **Poll now** (force a
+single tick without waiting for the interval).
+
+For a long-lived forward test, run the same dashboard on a server that
+stays up (VPS, home machine, etc.) — the state file is the only thing
+you need to carry between environments.
+
 ## Tests
 
 ```bash
