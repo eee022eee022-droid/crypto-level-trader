@@ -73,13 +73,22 @@
 </head>
 <body>
 <header>
-  <h1>Polymarket mean-reversion dashboard <span class="muted">· synthetic backtest</span></h1>
+  <h1>Polymarket mean-reversion dashboard <span class="muted" id="hdr-source">· synthetic backtest</span></h1>
   <div class="muted">bankroll <b>$<span id="hdr-bankroll">500</span></b> → ending <b class="pnl" id="hdr-ending">—</b></div>
 </header>
 
 <main>
   <!-- LEFT: controls -->
   <aside class="panel">
+    <h2>Data source</h2>
+    <div style="display:flex; gap:8px; margin-bottom:12px;">
+      <label style="flex:1; flex-direction:row; align-items:center; gap:6px; cursor:pointer;">
+        <input type="radio" name="mode" value="synthetic" checked/> Synthetic
+      </label>
+      <label style="flex:1; flex-direction:row; align-items:center; gap:6px; cursor:pointer;">
+        <input type="radio" name="mode" value="live"/> Real (Polymarket)
+      </label>
+    </div>
     <h2>Parameters</h2>
     <div class="grid">
       <label>Bankroll ($)<input type="number" id="bankroll" value="500" step="50" min="10"/></label>
@@ -94,12 +103,18 @@
       <label>Stop threshold<input type="number" id="stop_threshold" value="0.12" step="0.005" min="0.001"/></label>
       <label>Max hold (ticks)<input type="number" id="max_hold" value="60" step="5" min="1"/></label>
     </div>
+    <div id="live-params" class="grid" style="display:none; margin-top:10px; padding-top:10px; border-top:1px solid var(--border);">
+      <label>Min volume ($)<input type="number" id="min_volume" value="10000" step="1000" min="0"/></label>
+      <label>Min duration (h)<input type="number" id="min_duration_hours" value="24" step="12" min="1"/></label>
+      <label>Max age (days)<input type="number" id="max_age_days" value="30" step="5" min="1"/></label>
+      <label>Fidelity (min)<input type="number" id="fidelity_minutes" value="60" step="15" min="1"/></label>
+    </div>
     <div class="row">
       <button id="run-btn">Run backtest</button>
       <span class="status" id="status"></span>
     </div>
     <p class="muted" style="margin-top:14px; font-size:11px;">
-      Strategy enters when the price deviates from its EWMA by more than the entry threshold and exits on reversion, stop, timeout or resolution. Every market is synthetic (Beta p_true + OU noise). Nothing is sent to a live exchange.
+      Strategy enters when the price deviates from its EWMA by more than the entry threshold and exits on reversion, stop, timeout or resolution. <b>Synthetic</b> mode generates markets programmatically (Beta p_true + OU noise). <b>Real</b> mode pulls resolved Polymarket markets from their public HTTP API and runs the same strategy on the real price paths (demo money — no orders are placed). First real-mode run can take 20–60s (rate-limited fetch).
     </p>
   </aside>
 
@@ -148,14 +163,35 @@ const fmtUSD = v => (v >= 0 ? '+' : '') + '$' + v.toFixed(2);
 const fmtPct = v => (v >= 0 ? '+' : '') + (v * 100).toFixed(2) + '%';
 const cls = v => (v > 0 ? 'pos' : (v < 0 ? 'neg' : ''));
 
+function currentMode() {
+  return document.querySelector('input[name="mode"]:checked').value;
+}
+
 function collectParams() {
   const ids = ['bankroll','stake','n_markets','seed','steps','taker_fee','slippage',
                'ewma_halflife','entry_threshold','stop_threshold','max_hold'];
   const p = {};
   for (const id of ids) p[id] = parseFloat(document.getElementById(id).value);
-  // ints
   for (const id of ['n_markets','seed','steps','ewma_halflife','max_hold']) p[id] = Math.floor(p[id]);
+  if (currentMode() === 'live') {
+    for (const id of ['min_volume','min_duration_hours','max_age_days','fidelity_minutes']) {
+      p[id] = parseFloat(document.getElementById(id).value);
+    }
+    p['max_age_days'] = Math.floor(p['max_age_days']);
+    p['fidelity_minutes'] = Math.floor(p['fidelity_minutes']);
+  }
   return p;
+}
+
+function toggleLiveParams() {
+  const live = currentMode() === 'live';
+  document.getElementById('live-params').style.display = live ? 'grid' : 'none';
+  const hdr = document.getElementById('hdr-source');
+  hdr.textContent = live ? '· real Polymarket markets (paper money)' : '· synthetic backtest';
+  // Shrink n_markets default in live mode — fetching is slow
+  const n = document.getElementById('n_markets');
+  if (live && parseInt(n.value, 10) > 50) n.value = 30;
+  if (!live && parseInt(n.value, 10) < 100) n.value = 200;
 }
 
 let equityChart = null;
@@ -225,12 +261,15 @@ function setMetric(id, value, signed = false, pct = false) {
 async function run() {
   const btn = document.getElementById('run-btn');
   const status = document.getElementById('status');
-  btn.disabled = true; status.textContent = 'running…';
+  btn.disabled = true;
+  const mode = currentMode();
+  const endpoint = mode === 'live' ? '/api/run_live' : '/api/run';
+  status.textContent = mode === 'live' ? 'fetching real Polymarket history…' : 'running…';
   const params = collectParams();
   document.getElementById('hdr-bankroll').textContent = params.bankroll.toFixed(0);
 
   try {
-    const resp = await fetch('/api/run', {
+    const resp = await fetch(endpoint, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(params),
@@ -238,6 +277,11 @@ async function run() {
     if (!resp.ok) throw new Error('HTTP ' + resp.status + ': ' + await resp.text());
     const data = await resp.json();
     const s = data.summary;
+    if (s.error) {
+      status.textContent = 'error: ' + s.error;
+      btn.disabled = false;
+      return;
+    }
     setMetric('m-ending', s.ending_bankroll);
     document.getElementById('hdr-ending').textContent = '$' + s.ending_bankroll.toFixed(2);
     document.getElementById('hdr-ending').className = 'pnl ' + cls(s.total_pnl);
@@ -250,7 +294,10 @@ async function run() {
     setMetric('m-fees', s.total_fees);
     renderEquity(data.equity, data.drawdown);
     renderTrades(data.trades);
-    status.textContent = 'done · ' + s.n_trades + ' trades · seed=' + params.seed;
+    const src = s.data_source === 'polymarket_live'
+      ? `real · ${s.n_markets} markets · avg ${s.avg_ticks_per_market} ticks · ${s.n_yes_resolutions} yes / ${s.n_no_resolutions} no`
+      : `synthetic · seed=${params.seed}`;
+    status.textContent = `done · ${s.n_trades} trades · ${src}`;
     if (s.bankroll_ever_wiped) status.textContent += ' · ⚠ bankroll hit 0';
   } catch (e) {
     status.textContent = 'error: ' + e.message;
@@ -260,6 +307,8 @@ async function run() {
 }
 
 document.getElementById('run-btn').addEventListener('click', run);
+document.querySelectorAll('input[name="mode"]').forEach(el => el.addEventListener('change', toggleLiveParams));
+toggleLiveParams();
 // auto-run on page load
 run();
 </script>

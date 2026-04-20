@@ -113,16 +113,22 @@ class BacktestResult:
 def run_backtest(cfg: BacktestConfig) -> BacktestResult:
     """Simulate ``cfg.n_markets`` markets and run the strategy across all of them."""
     markets = simulate_markets(cfg.simulator, cfg.n_markets, seed=cfg.seed)
+    return run_backtest_on_markets(markets, cfg)
+
+
+def run_backtest_on_markets(markets, cfg: BacktestConfig) -> BacktestResult:
+    """Run the strategy over a pre-computed iterable of :class:`MarketPath`."""
     strategy = MeanReversionStrategy(cfg.strategy)
     all_trades: list[Trade] = []
+    market_count = 0
     for market in markets:
+        market_count += 1
         trades = strategy.trade_market(market, taker_fee=cfg.taker_fee, slippage=cfg.slippage)
         all_trades.extend(trades)
 
-    result = BacktestResult(
+    return BacktestResult(
         trades=all_trades,
         starting_bankroll=cfg.starting_bankroll,
         ending_bankroll=cfg.starting_bankroll + sum(t.pnl for t in all_trades),
-        n_markets=cfg.n_markets,
+        n_markets=market_count,
     )
-    return result
